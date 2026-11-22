@@ -1,0 +1,25 @@
+# 构建中间产物
+installer/dist/
+installer/*.log
+_build.exe
+*.old.exe
+
+# 运行时生成（跟随用户配置，不进仓库）
+config.ini
+autolock.log
+
+# 临时文件
+_*.cs
+_*.exe
+_*.png
+*.tmp
+
+# 系统文件
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 编辑器
+.vs/
+.vscode/
+*.user
