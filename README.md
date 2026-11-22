@@ -15,7 +15,7 @@
 
 **推荐：下载安装包，双击即可**
 
-👉 **[AutoLock-Setup-1.0.0.exe](dist/AutoLock-Setup-1.0.0.exe)** （2.4 MB）
+👉 **[AutoLock-Setup-1.0.0.exe](https://github.com/zhangsanawa/AutoLock/releases/download/v1.0.0/AutoLock-Setup-1.0.0.exe)** （2.4 MB）
 
 仓库地址：https://github.com/zhangsanawa/AutoLock
 
