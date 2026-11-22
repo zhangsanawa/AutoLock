@@ -15,7 +15,7 @@
 
 **推荐：下载安装包，双击即可**
 
-👉 **[AutoLock-Setup-1.0.0.exe](https://github.com/zhangsanawa/AutoLock/releases/download/v1.0.0/AutoLock-Setup-1.0.0.exe)** （2.4 MB）
+👉 **[AutoLock-Setup-1.0.1.exe](https://github.com/zhangsanawa/AutoLock/releases/download/v1.0.1/AutoLock-Setup-1.0.1.exe)** （2.4 MB）
 
 仓库地址：https://github.com/zhangsanawa/AutoLock
 
@@ -74,7 +74,7 @@
 - **全屏播放时不锁定**：看电影、打游戏时不会突然被锁
 - **状态一眼可见**：每个开关前面有 `●` / `○`，顶部状态栏实时显示当前配置
 - **双击托盘图标 = 立即锁定**，等效 Win+L
-- **开机自启**：带 `--delay` 参数等资源管理器就绪后再注册图标
+- **开机自启**：由安装程序写入（注册表 + 启动文件夹双保险），带 `--delay` 等资源管理器就绪后再注册图标
 - **高 DPI 支持**：125% / 150% / 200% 缩放下图标和菜单都不糊
 - **资源管理器崩溃后自动恢复图标**：监听 `TaskbarCreated` 消息
 - 单文件、无安装依赖、无服务、无驱动、不联网
@@ -125,6 +125,46 @@ schtasks /create /tn "AutoLock" /tr "\"C:\Program Files\AutoLock\AutoLock.exe\" 
 
 ---
 
+## 开机自启是怎么实现的
+
+Windows 有一个容易踩的坑：**普通权限的进程写不了自启项**。
+
+即使你的账户是管理员，未提权运行时拿到的也是**受限令牌**（`NT AUTHORITY\RESTRICTED`），
+对 `HKCU\...\Run` 只有只读权限。所以「程序里点一下开关就设置自启」这件事，
+在普通权限下**必然失败**。
+
+AutoLock 的处理方式：
+
+| 场景 | 行为 |
+|---|---|
+| **安装包安装**（管理员权限） | ✅ 自动写入自启，同时写注册表和启动文件夹 |
+| 绿色版双击运行 | ⚠️ 程序内开关会提示"需管理员权限"，右键以管理员身份运行后可设置 |
+
+安装时写入的自启命令是：
+
+```
+"H:\path\AutoLock.exe" --delay
+```
+
+**刻意不带 `--elevate`** —— 开机时由 explorer 直接拉起，如果带提权参数会弹 UAC，
+用户不点确认就启动失败，这正是很多人"设了自启但开机没反应"的原因。
+
+`--delay` 会让程序先轮询等待通知区域就绪（最多 60 秒），再注册托盘图标，
+避免开机时图标丢失。
+
+### 想手动管理自启
+
+```powershell
+# 查看
+reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v AutoLock
+
+# 删除（关闭自启）
+reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v AutoLock /f
+del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\AutoLock.lnk"
+```
+
+---
+
 ## 使用方法
 
 安装后从开始菜单或桌面启动，任务栏右下角出现**蓝色小锁**（可能在 `^` 折叠区里）。右键调整设置。
@@ -140,7 +180,7 @@ schtasks /create /tn "AutoLock" /tr "\"C:\Program Files\AutoLock\AutoLock.exe\" 
 ✓ ●  锁定期间保持屏幕常亮（不休眠）
 ✓ ●  全屏播放时不锁定
 ─────────────────────────────
-○ 开机自动启动
+○ 开机自动启动（已由安装程序启用）
 ─────────────────────────────
   退出
 ```
@@ -165,6 +205,8 @@ AutoLock.exe                      正常启动
 AutoLock.exe --minutes 30         本次以 30 分钟阈值启动
 AutoLock.exe --elevate            未提权时自动请求管理员权限
 AutoLock.exe --delay              等通知区域就绪后再注册图标（开机自启用）
+AutoLock.exe --enable-autostart   设置开机自启（需管理员权限）
+AutoLock.exe --disable-autostart  取消开机自启
 AutoLock.exe --dry-run            只写日志不真的锁定（测试用）
 AutoLock.exe --selftest           打印配置、DPI、空闲时间后退出
 AutoLock.exe --scan --seconds 60  实时打印空闲秒数和前台窗口信息，不锁定
@@ -242,7 +284,7 @@ AutoLock/
 │   ├── AutoLock.iss       Inno Setup 安装脚本
 │   └── default.ini        默认配置
 ├── dist/
-│   └── AutoLock-Setup-1.0.0.exe   安装包
+│   └── AutoLock-Setup-1.0.1.exe   安装包
 ├── README.md
 └── LICENSE
 ```
