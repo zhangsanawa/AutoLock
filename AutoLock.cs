@@ -475,7 +475,8 @@ namespace AutoLockApp
             fullscreenItem.Checked = cfg.SkipFullscreen;
 
             bool su = IsStartupEnabled();
-            startupItem.Text = Mark(su) + "  开机自动启动";
+            startupItem.Text = Mark(su) + "  开机自动启动"
+                + (su ? "（已由安装程序启用）" : "（点击设置）");
             startupItem.Checked = su;
 
             timeMenu.Text = "空闲时间：" + cfg.Minutes + " 分钟";
@@ -504,8 +505,20 @@ namespace AutoLockApp
             return s;
         }
 
-        private static bool IsStartupEnabled()
+        // 计划任务名
+        private const string TaskName = "AutoLock";
+
+        internal static bool IsStartupEnabled()
         {
+            // 只要 Run 项或启动快捷方式任一存在，就算开启
+            try
+            {
+                if (File.Exists(Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.Startup), "AutoLock.lnk")))
+                    return true;
+            }
+            catch { }
+
             try
             {
                 using (RegistryKey k = Registry.CurrentUser.OpenSubKey(
@@ -517,28 +530,181 @@ namespace AutoLockApp
             catch { return false; }
         }
 
-        private void SetStartup(bool on)
+        private static int RunSchtasks(string args)
+        {
+            try
+            {
+                using (System.Diagnostics.Process p = new System.Diagnostics.Process())
+                {
+                    p.StartInfo.FileName = "schtasks.exe";
+                    p.StartInfo.Arguments = args;
+                    p.StartInfo.CreateNoWindow = true;
+                    p.StartInfo.UseShellExecute = false;
+                    p.StartInfo.RedirectStandardOutput = true;
+                    p.StartInfo.RedirectStandardError = true;
+                    p.Start();
+                    string err = p.StandardError.ReadToEnd();
+                    p.WaitForExit(15000);
+                    if (!string.IsNullOrEmpty(err)) Log.Write("schtasks: " + err.Trim());
+                    return p.ExitCode;
+                }
+            }
+            catch (Exception ex) { Log.Write("schtasks 调用失败: " + ex.Message); return -1; }
+        }
+
+        // 清理旧的 Run 项（它带 --elevate，开机必然失败）
+        private static void RemoveLegacyRunEntry()
         {
             try
             {
                 using (RegistryKey k = Registry.CurrentUser.OpenSubKey(
                     @"Software\Microsoft\Windows\CurrentVersion\Run", true))
                 {
-                    if (k == null) return;
-                    if (on)
-                    {
-                        // 加 --delay：等 Explorer 托盘就绪后再注册图标，避免开机时图标丢失
-                        k.SetValue("AutoLock", "\"" + Application.ExecutablePath + "\" --delay --elevate");
-                        Log.Write("已设置开机自启（带 --delay）");
-                    }
-                    else
+                    if (k != null && k.GetValue("AutoLock") != null)
                     {
                         k.DeleteValue("AutoLock", false);
-                        Log.Write("已取消开机自启");
+                        Log.Write("已清理旧的自启注册表项");
                     }
                 }
             }
-            catch (Exception ex) { Log.Write("设置开机启动失败: " + ex.Message); }
+            catch { }
+        }
+
+        // ── 直接用 IShellLink COM 接口创建 .lnk，不依赖 WScript.Shell ──
+        [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+        private class CShellLink { }
+
+        [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown),
+         Guid("000214F9-0000-0000-C000-000000000046")]
+        private interface IShellLinkW
+        {
+            void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszFile,
+                int cch, IntPtr pfd, uint fFlags);
+            void GetIDList(out IntPtr ppidl);
+            void SetIDList(IntPtr pidl);
+            void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszName, int cch);
+            void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+            void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszDir, int cch);
+            void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string pszDir);
+            void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszArgs, int cch);
+            void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string pszArgs);
+            void GetHotkey(out short pwHotkey);
+            void SetHotkey(short wHotkey);
+            void GetShowCmd(out int piShowCmd);
+            void SetShowCmd(int iShowCmd);
+            void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszIconPath,
+                int cch, out int piIcon);
+            void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string pszIconPath, int iIcon);
+            void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string pszPathRel, uint dwReserved);
+            void Resolve(IntPtr hwnd, uint fFlags);
+            void SetPath([MarshalAs(UnmanagedType.LPWStr)] string pszFile);
+        }
+
+        [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown),
+         Guid("0000010b-0000-0000-C000-000000000046")]
+        private interface IPersistFile
+        {
+            void GetClassID(out Guid pClassID);
+            void IsDirty();
+            void Load([MarshalAs(UnmanagedType.LPWStr)] string pszFileName, uint dwMode);
+            void Save([MarshalAs(UnmanagedType.LPWStr)] string pszFileName, bool fRemember);
+            void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string pszFileName);
+            void GetCurFile([MarshalAs(UnmanagedType.LPWStr)] out string ppszFileName);
+        }
+
+        internal static bool CreateShortcutImpl(string lnkPath, string target, string args, string workDir)
+        {
+            try
+            {
+                IShellLinkW link = (IShellLinkW)new CShellLink();
+                link.SetPath(target);
+                link.SetArguments(args);
+                link.SetWorkingDirectory(workDir);
+                link.SetDescription("AutoLock 空闲自动锁屏");
+                link.SetIconLocation(target, 0);
+
+                IPersistFile file = (IPersistFile)link;
+                file.Save(lnkPath, true);
+                Marshal.ReleaseComObject(link);
+                return File.Exists(lnkPath);
+            }
+            catch (Exception ex) { Log.Write("CreateShortcutImpl 失败: " + ex.Message); return false; }
+        }
+
+        // 自启快捷方式路径（当前用户启动文件夹）
+        private static string StartupLnkPath
+        {
+            get
+            {
+                return Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.Startup), "AutoLock.lnk");
+            }
+        }
+
+        // 创建/删除启动文件夹里的快捷方式
+        private static bool WriteStartupShortcut(bool create)
+        {
+            try
+            {
+                string lnk = StartupLnkPath;
+                if (!create)
+                {
+                    if (File.Exists(lnk)) File.Delete(lnk);
+                    return true;
+                }
+
+                return CreateShortcutImpl(lnk, Application.ExecutablePath, "--delay",
+                    Path.GetDirectoryName(Application.ExecutablePath));
+            }
+            catch (Exception ex) { Log.Write("写启动快捷方式失败: " + ex.Message); return false; }
+        }
+
+        private void SetStartup(bool on)
+        {
+            RemoveLegacyRunEntry();
+            RunSchtasks("/delete /tn \"" + TaskName + "\" /f");
+
+            if (!on)
+            {
+                WriteStartupShortcut(false);
+                Log.Write("已取消开机自启");
+                return;
+            }
+
+            string exe = Application.ExecutablePath;
+
+            // 方案1：注册表 Run 项（不带 --elevate，开机不会被 UAC 拦掉）
+            bool runOk = false;
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Run", true))
+                {
+                    if (k != null)
+                    {
+                        k.SetValue("AutoLock", "\"" + exe + "\" --delay");
+                        runOk = true;
+                    }
+                }
+            }
+            catch (Exception ex) { Log.Write("写 Run 项失败: " + ex.Message); }
+
+            // 方案2：启动文件夹快捷方式（双保险）
+            bool lnkOk = WriteStartupShortcut(true);
+
+            Log.Write("已设置开机自启  Run=" + runOk + "  快捷方式=" + lnkOk
+                + "  exe=" + exe);
+
+            if (!runOk && !lnkOk)
+            {
+                Log.Write("开机自启设置失败：当前进程权限不足（受限令牌）");
+                MessageBox.Show(
+                    "设置开机自启失败：当前进程没有写入权限。\r\n\r\n"
+                    + "解决方法（任选其一）：\r\n"
+                    + "1. 右键 AutoLock.exe → 以管理员身份运行，再点一次开关\r\n"
+                    + "2. 重新运行安装包，在安装向导里勾选「开机自动启动」",
+                    "AutoLock", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private void ApplyExecutionState()
@@ -628,8 +794,32 @@ namespace AutoLockApp
 
         private void OnToggleStartup(object sender, EventArgs e)
         {
-            SetStartup(!IsStartupEnabled());
+            // 方案：自启由安装程序写入。普通权限进程改不了（受限令牌无写权限）
+            if (IsStartupEnabled())
+            {
+                MessageBox.Show(
+                    "开机自启已由安装程序启用，当前正在生效。\r\n\r\n"
+                    + "如需关闭，请到「设置 → 应用 → AutoLock → 卸载」重新安装时取消勾选，\r\n"
+                    + "或手动删除启动文件夹里的 AutoLock.lnk。\r\n\r\n"
+                    + "启动文件夹：\r\n"
+                    + Environment.GetFolderPath(Environment.SpecialFolder.Startup),
+                    "AutoLock — 开机自启", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            // 未启用：尝试设置（若当前为提权运行则可成功）
+            SetStartup(true);
             RefreshMenu();
+
+            if (!IsStartupEnabled())
+            {
+                MessageBox.Show(
+                    "当前进程没有写入权限，无法开启开机自启。\r\n\r\n"
+                    + "请用下面任意一种方式：\r\n"
+                    + "1. 右键 AutoLock.exe → 以管理员身份运行，再点一次此开关\r\n"
+                    + "2. 重新运行安装包，在向导里勾选「开机自动启动」（推荐）",
+                    "AutoLock — 开机自启", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private void OnPickMinutes(int minutes)
@@ -702,6 +892,7 @@ namespace AutoLockApp
             bool delay = false;
             bool wantElevate = false;
             bool noElevate = false;
+            string autoStart = null;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -712,11 +903,49 @@ namespace AutoLockApp
                 else if (a == "--dry-run") dryRun = true;
                 else if (a == "--selftest") selfTest = true;
                 else if (a == "--scan") scan = true;
+                else if (a == "--enable-autostart") autoStart = "on";
+                else if (a == "--disable-autostart") autoStart = "off";
                 else if (a == "--seconds" && i + 1 < args.Length) int.TryParse(args[++i], out scanSeconds);
                 else if (a == "--minutes" && i + 1 < args.Length) int.TryParse(args[++i], out forcedMinutes);
             }
 
             if (selfTest) { SelfTest(); return; }
+
+            // 命令行直接设置开机自启（用于验证）
+            if (autoStart != null)
+            {
+                bool on = autoStart == "on";
+                string exe = Application.ExecutablePath;
+                bool runOk = false, lnkOk = false;
+                try
+                {
+                    using (RegistryKey k = Registry.CurrentUser.OpenSubKey(
+                        @"Software\Microsoft\Windows\CurrentVersion\Run", true))
+                    {
+                        if (k != null)
+                        {
+                            if (on) { k.SetValue("AutoLock", "\"" + exe + "\" --delay"); runOk = true; }
+                            else k.DeleteValue("AutoLock", false);
+                            runOk = true;
+                        }
+                    }
+                }
+                catch (Exception ex) { Console.WriteLine("Run 项失败: " + ex.Message); }
+
+                string lnk = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.Startup), "AutoLock.lnk");
+                if (!on) { if (File.Exists(lnk)) File.Delete(lnk); lnkOk = true; }
+                else
+                {
+                    lnkOk = App.CreateShortcutImpl(lnk, exe, "--delay", Path.GetDirectoryName(exe));
+                }
+                Console.WriteLine("自启设置: " + (on ? "开启" : "关闭")
+                    + "  Run=" + runOk + "  快捷方式=" + lnkOk);
+                Console.WriteLine("Run 项: " + ((GetRunValue() ?? "(无)")));
+                Console.WriteLine("启动快捷方式: " + lnk + "  存在=" + File.Exists(lnk));
+                Environment.ExitCode = (on && !runOk && !lnkOk) ? 2 : 0;
+                return;
+            }
 
             bool created;
             Mutex mutex = new Mutex(true, "AutoLock_SingleInstance_DSH", out created);
@@ -762,6 +991,20 @@ namespace AutoLockApp
             Application.Run(new App(dryRun, forcedMinutes));
         }
 
+        private static string GetRunValue()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Run", false))
+                {
+                    if (k == null) return null;
+                    return k.GetValue("AutoLock") as string;
+                }
+            }
+            catch { return null; }
+        }
+
         private static void Emit(string s)
         {
             Console.WriteLine(s);
@@ -794,6 +1037,7 @@ namespace AutoLockApp
             Emit("  当前全屏 : " + Native.IsFullscreenForeground());
             Icon ic = IconLoader.ForTray();
             Emit("  图标来源 : " + IconLoader.Source + "  (" + ic.Width + "x" + ic.Height + ")");
+            Emit("  开机自启 : " + App.IsStartupEnabled());
             Emit("  缩放比例 : " + (Math.Round(DeviceDpiScale() * 100)) + "%   小图标尺寸: "
                 + SystemInformation.SmallIconSize.Width + "px");
         }
