@@ -4,6 +4,10 @@ installer/*.log
 _build.exe
 *.old.exe
 
+# 敏感文件 / 本地工具
+token.txt
+upload.mjs
+
 # 运行时生成（跟随用户配置，不进仓库）
 config.ini
 autolock.log
